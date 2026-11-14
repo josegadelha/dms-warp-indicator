@@ -4,16 +4,23 @@ import qs.Common
 import qs.Widgets
 import qs.Services
 import qs.Modules.Plugins
+import qs.DCommon.Widgets
 
 PluginComponent {
     id: root
 
     property bool isConnected: false
-    property string statusText: "Click to check"
+    property bool isConnecting: false
     property bool isLoading: false
+    property bool toggling: false
+    property string statusText: "Checking..."
+    readonly property real barPillPadding: Theme.snap(
+        (barConfig?.widgetPadding ?? SettingsData.barWidgetPaddingDefault)
+            * (widgetThickness / 30),
+        parentScreen ? CompositorService.getScreenScale(parentScreen) : 1
+    )
 
     function updateStatus() {
-        isLoading = true
         Proc.runCommand(
             "warpIndicator.status",
             ["warp-cli", "status"],
@@ -21,100 +28,112 @@ PluginComponent {
                 if (exitCode === 0) {
                     const lowerOutput = output.toLowerCase()
 
-                    if (lowerOutput.includes("status update: connected")) {
-                        isConnected = true
-                        statusText = "Connected"
-                    } else if (lowerOutput.includes("status update: disconnected") ||
-                        lowerOutput.includes("disconnected")) {
+                    if (lowerOutput.includes("connecting")) {
                         isConnected = false
+                        isConnecting = true
+                        statusText = "Connecting..."
+                    } else if (lowerOutput.includes("disconnected")) {
+                        isConnected = false
+                        isConnecting = false
                         statusText = "Disconnected"
-                        } else if (lowerOutput.includes("connecting")) {
-                            isConnected = false
-                            statusText = "Connecting..."
-                        } else {
-                            isConnected = false
-                            statusText = "Unknown"
-                        }
+                    } else if (lowerOutput.includes("connected")) {
+                        isConnected = true
+                        isConnecting = false
+                        statusText = "Connected"
+                    } else {
+                        isConnected = false
+                        isConnecting = false
+                        statusText = "Unknown"
+                    }
                 } else {
                     isConnected = false
+                    isConnecting = false
                     statusText = "Error"
                 }
-                isLoading = false
+
+                isLoading = isConnecting
             },
             100
         )
     }
 
     function toggleWarp() {
-        if (isLoading) return
+        if (isLoading)
+            return
 
-            const targetState = !isConnected
-            const command = isConnected ? ["warp-cli", "disconnect"] : ["warp-cli", "connect"]
+        const targetState = !isConnected
+        const command = isConnected
+            ? ["warp-cli", "disconnect"]
+            : ["warp-cli", "connect"]
 
-            isLoading = true
-            isConnected = targetState
-            statusText = targetState ? "Connecting..." : "Disconnecting..."
+        isLoading = true
+        toggling = true
+        isConnected = targetState
+        statusText = targetState ? "Connecting..." : "Disconnecting..."
 
-            Proc.runCommand(
-                "warpIndicator.toggle",
-                command,
-                (output, exitCode) => {
-                    if (exitCode === 0) {
-                        if (typeof ToastService !== "undefined") {
-                            ToastService.showInfo(targetState ? "Connecting WARP..." : "Disconnecting WARP...")
-                        }
-                        // Update nach 1.5 Sekunden
-                        Qt.callLater(() => {
-                            updateStatusTimer.restart()
-                        })
-                    } else {
-                        if (typeof ToastService !== "undefined") {
-                            ToastService.showError("WARP toggle failed")
-                        }
-                        isConnected = !targetState
-                        updateStatus()
+        Proc.runCommand(
+            "warpIndicator.toggle",
+            command,
+            (output, exitCode) => {
+                if (exitCode === 0) {
+                    if (typeof ToastService !== "undefined") {
+                        ToastService.showInfo(
+                            targetState
+                                ? "Connecting WARP..."
+                                : "Disconnecting WARP..."
+                        )
                     }
-                },
-                50
-            )
+                    afterToggleTimer.restart()
+                } else {
+                    if (typeof ToastService !== "undefined") {
+                        ToastService.showError("WARP toggle failed")
+                    }
+                    toggling = false
+                    isLoading = false
+                    updateStatus()
+                }
+            },
+            50
+        )
+    }
+
+    Component.onCompleted: updateStatus()
+
+    Timer {
+        id: afterToggleTimer
+        interval: 1500
+        onTriggered: {
+            root.toggling = false
+            root.updateStatus()
+        }
     }
 
     Timer {
-        id: updateStatusTimer
-        interval: 1500
-        onTriggered: updateStatus()
+        interval: root.isConnecting ? 1000 : 5000
+        running: true
+        repeat: true
+        onTriggered: {
+            if (!root.toggling)
+                root.updateStatus()
+        }
     }
 
     // Horizontal bar (top/bottom)
     horizontalBarPill: Component {
-        StyledRect {
-            implicitWidth: content.width + Theme.spacingM * 2
-            implicitHeight: parent.widgetThickness
+        Item {
+            implicitWidth: Math.max(0, root.widgetThickness - root.barPillPadding * 2)
+            implicitHeight: root.widgetThickness
             width: implicitWidth
             height: implicitHeight
-            radius: Theme.cornerRadius
-            color: root.isConnected ? Theme.primaryContainer : Theme.surfaceContainerHigh
 
-            Row {
-                id: content
+            DIcon {
                 anchors.centerIn: parent
-                spacing: Theme.spacingS
-
-                StyledText {
-                    id: iconText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: root.isConnected ? "🔒" : "🔓"
-                    font.pixelSize: Theme.fontSizeMedium
-                }
-
-                StyledText {
-                    id: labelText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: root.isLoading ? "..." : ""
-                    color: root.isConnected ? Theme.primary : Theme.surfaceText
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.weight: Font.Medium
-                }
+                name: root.isConnected ? "vpn_lock" : "vpn_key_off"
+                size: Theme.barIconSize(parent.height, -4)
+                color: root.isConnected
+                    ? Theme.primary
+                    : Theme.widgetIconColor
+                opacity: root.isLoading ? 0.5 : 1.0
             }
 
             DankTooltip {
@@ -125,19 +144,20 @@ PluginComponent {
 
     // Vertical bar (left/right)
     verticalBarPill: Component {
-        StyledRect {
-            implicitWidth: parent.widgetThickness
-            implicitHeight: iconText.implicitHeight + Theme.spacingM * 2
+        Item {
+            implicitWidth: root.widgetThickness
+            implicitHeight: Math.max(0, root.widgetThickness - root.barPillPadding * 2)
             width: implicitWidth
             height: implicitHeight
-            radius: Theme.cornerRadius
-            color: root.isConnected ? Theme.primaryContainer : Theme.surfaceContainerHigh
 
-            StyledText {
-                id: iconText
+            DIcon {
                 anchors.centerIn: parent
-                text: root.isConnected ? "🔒" : "🔓"
-                font.pixelSize: Theme.fontSizeMedium
+                name: root.isConnected ? "vpn_lock" : "vpn_key_off"
+                size: Theme.barIconSize(parent.height, -4)
+                color: root.isConnected
+                    ? Theme.primary
+                    : Theme.widgetIconColor
+                opacity: root.isLoading ? 0.5 : 1.0
             }
 
             DankTooltip {
@@ -154,9 +174,7 @@ PluginComponent {
             showCloseButton: true
 
             // Check status when popout opens
-            Component.onCompleted: {
-                root.updateStatus()
-            }
+            Component.onCompleted: root.updateStatus()
 
             Column {
                 width: parent.width
@@ -173,10 +191,16 @@ PluginComponent {
                         anchors.centerIn: parent
                         spacing: Theme.spacingS
 
-                        StyledText {
+                        DIcon {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: root.isLoading ? "⏳" : (root.isConnected ? "🔒" : "🔓")
-                            font.pixelSize: 32
+                            name: root.isLoading
+                                ? "vpn_key"
+                                : (root.isConnected ? "vpn_lock" : "vpn_key_off")
+                            size: 32
+                            color: root.isConnected
+                                ? Theme.primary
+                                : Theme.widgetIconColor
+                            opacity: root.isLoading ? 0.5 : 1.0
                         }
 
                         StyledText {
@@ -184,7 +208,9 @@ PluginComponent {
                             text: root.statusText
                             font.pixelSize: Theme.fontSizeLarge
                             font.weight: Font.Bold
-                            color: root.isConnected ? Theme.primary : Theme.surfaceText
+                            color: root.isConnected
+                                ? Theme.primary
+                                : Theme.surfaceText
                         }
                     }
                 }
@@ -193,20 +219,20 @@ PluginComponent {
                 DankButton {
                     width: parent.width
                     height: 48
-                    text: root.isLoading ? "Please wait..." : (root.isConnected ? "Disconnect" : "Connect")
+                    text: root.isLoading
+                        ? "Please wait..."
+                        : (root.isConnected ? "Disconnect" : "Connect")
                     enabled: !root.isLoading
 
-                    onClicked: {
-                        root.toggleWarp()
-                    }
+                    onClicked: root.toggleWarp()
                 }
 
                 // Info Text
                 StyledText {
                     width: parent.width
                     text: root.isConnected
-                    ? "Your connection is secured through Cloudflare WARP"
-                    : "Click Connect to secure your connection"
+                        ? "Your connection is secured through Cloudflare WARP"
+                        : "Click Connect to secure your connection"
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceVariantText
                     wrapMode: Text.WordWrap
